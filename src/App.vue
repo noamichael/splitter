@@ -10,6 +10,7 @@ import DataTable from 'primevue/datatable';
 import Column from 'primevue/column';
 import Fieldset from 'primevue/fieldset';
 import MultiSelect from 'primevue/multiselect';
+import { createWorker } from 'tesseract.js';
 
 interface Item {
   name: string
@@ -33,7 +34,25 @@ interface PersonTotal {
   tax: number
   tip: number
   total: number
+  subtotalFormatted: string
+  taxFormatted: string
+  tipFormatted: string
+  totalFormatted: string
+
 }
+
+const emptyTotal = (name?: string) => ({
+  items: [],
+  name: name,
+  subtotal: 0,
+  tax: 0,
+  tip: 0,
+  total: 0,
+  subtotalFormatted: '',
+  taxFormatted: '',
+  tipFormatted: '',
+  totalFormatted: '',
+}) as PersonTotal;
 
 // Bill Totals
 const tax = ref<string>('6.625');
@@ -53,6 +72,7 @@ const owners = ref<Person[]>([]);
 
 // Summary
 const results = ref<PersonTotal[]>([]);
+const summary = ref<PersonTotal>(emptyTotal('summary'))
 
 const resetForm = () => {
   item.value = "";
@@ -71,26 +91,84 @@ const addPerson = (event: SubmitEvent) => {
   person.value = '';
 };
 
+const parseLine = (line: string) => {
+  if (line.indexOf('$') < 0) {
+    return;
+  }
+
+  const parts = line.split('$')
+
+  let item = ""
+  let quantity = ""
+  let price = ""
+
+  let lastWasNumber = false
+
+  for (const char of parts[0] || '') {
+    if (char.match(/[0-9.]+/)) {
+      if (lastWasNumber || !quantity) {
+        quantity += char
+        lastWasNumber = true
+      }
+    } else {
+      lastWasNumber = false
+      item += char
+    }
+  }
+
+  for (const char of parts[1] || '') {
+    if (!char.match(/[0-9.]+/)) {
+      break
+    }
+    price += char
+  }
+
+  console.log(`[${item}] @ [${quantity}] = ${price}`)
+
+  addItemWithValues(item.trim(), Number(quantity.trim()), Number(price.trim()), [])
+
+};
+
+const uploadImage = async (event: Event) => {
+  const fileInput = event.target as HTMLInputElement
+  if (!fileInput.files) {
+    return
+  }
+  const file = fileInput.files[0];
+  const worker = await createWorker('eng');
+  const ret = await worker.recognize(file);
+
+  for (const line of ret.data.text.split('\n')) {
+    parseLine(line)
+  }
+  await worker.terminate();
+
+};
+
 const removePerson = (index: number) => {
   people.value.splice(index, 1)
 };
 
 const addItem = (event: SubmitEvent) => {
   event.preventDefault();
-  let itemPrice = Number(price.value);
-  let itemQuantity = Number(quantity.value);
+  const itemPrice = Number(price.value);
+  const itemQuantity = Number(quantity.value);
 
-  if (itemQuantity < 1) {
-    return
-  } else if (itemQuantity > 1) {
-    itemPrice = itemPrice / itemQuantity;
-  }
-
-  for (let i = 0; i < itemQuantity; i++) {
-    items.value.push({ name: item.value, owners: owners.value, price: itemPrice.toFixed(2) });
-  }
+  addItemWithValues(item.value, itemQuantity, itemPrice, owners.value)
 
   resetForm();
+};
+
+const addItemWithValues = (name: string, quantity: number, price: number, owners: Person[]) => {
+  if (quantity < 1) {
+    return
+  } else if (quantity > 1) {
+    price = price / quantity;
+  }
+
+  for (let i = 0; i < quantity; i++) {
+    items.value.push({ name: name, owners: owners, price: price.toFixed(2) });
+  }
 };
 
 const removeItem = (index: number) => {
@@ -102,14 +180,7 @@ const splitBill = () => {
   const totalsByPerson = new Map<string, PersonTotal>()
   totalsByPerson.clear()
   for (const person of people.value) {
-    totalsByPerson.set(person.name, {
-      items: [],
-      name: person.name,
-      subtotal: 0,
-      tax: 0,
-      tip: 0,
-      total: 0,
-    })
+    totalsByPerson.set(person.name, emptyTotal(person.name))
   }
 
   for (const item of items.value) {
@@ -126,22 +197,39 @@ const splitBill = () => {
   const taxAsDecimal = Number(tax.value) / 100
   const tipAsDecimal = Number(tip.value) / 100
 
-  for (const [person, total] of totalsByPerson) {
+  let summarySubtotal = 0
+  let summaryTax = 0;
+  let summaryTip = 0;
+  let summaryTotal = 0;
+
+
+  for (const [person, personTotal] of totalsByPerson) {
+    console.log(`Calculating total for ${person}`)
     // Add all the items for the person
-    total.subtotal = total.items.map(i => i.partialPrice).reduce((a, b) => a + b, 0)
-    total.tax = total.subtotal * taxAsDecimal
-    total.tip = total.subtotal * tipAsDecimal
-    total.total = total.subtotal + total.tax + total.tip
+    personTotal.subtotal = personTotal.items.map(i => i.partialPrice).reduce((a, b) => a + b, 0)
+    personTotal.tax = personTotal.subtotal * taxAsDecimal
+    personTotal.tip = personTotal.subtotal * tipAsDecimal
+    personTotal.total = personTotal.subtotal + personTotal.tax + personTotal.tip
 
-    results.value.push(total)
+    summarySubtotal += personTotal.subtotal
+    summaryTax += personTotal.tax
+    summaryTip += personTotal.tip
+    summaryTotal += personTotal.total
 
-    console.log(`${person} 
-    sub: ${total.subtotal.toFixed(2)}
-    tax: ${total.tax.toFixed(2)}
-    tip: ${total.tip.toFixed(2)}
-    tot: ${total.total.toFixed(2)}
-    `)
+    personTotal.subtotalFormatted = personTotal.subtotal.toFixed(2)
+    personTotal.taxFormatted = personTotal.tax.toFixed(2)
+    personTotal.tipFormatted = personTotal.tip.toFixed(2)
+    personTotal.totalFormatted = personTotal.total.toFixed(2)
+
+    results.value.push(personTotal)
+
+    console.table(personTotal)
   }
+
+  summary.value.subtotalFormatted = summarySubtotal.toFixed(2)
+  summary.value.taxFormatted = summaryTax.toFixed(2)
+  summary.value.tipFormatted = summaryTip.toFixed(2)
+  summary.value.totalFormatted = summaryTotal.toFixed(2)
 };
 
 </script>
@@ -154,6 +242,7 @@ const splitBill = () => {
     <template #content>
 
       <Fieldset legend="Define People">
+        <input type="file" accept="image/png,image/jpeg,image/jpg" @change="uploadImage">
         <form @submit="addPerson">
           <div class="form-control">
             <IftaLabel>
@@ -257,13 +346,33 @@ const splitBill = () => {
 
       <Button type="button" @click="splitBill" label="SPLIT!" icon="pi pi-check" iconPos="right" />
 
-      <Fieldset v-if="results.length" header="Results">
+      <Fieldset v-if="results.length" legend="Results">
         <DataTable :value="results" tableStyle="min-width: 50rem">
-          <Column field="name" header="Name"></Column>
-          <Column field="subtotal" header="Subtotal"></Column>
-          <Column field="tax" header="Tax"></Column>
-          <Column field="tip" header="Tip"></Column>
-          <Column field="total" header="Total"></Column>
+          <Column field="name" header="Name">
+            <template #footer>
+              <span class="summary"> Total: </span>
+            </template>
+          </Column>
+          <Column field="subtotalFormatted" header="Subtotal">
+            <template #footer>
+              <span class="summary"> {{ summary.subtotalFormatted }} </span>
+            </template>
+          </Column>
+          <Column field="taxFormatted" header="Tax">
+            <template #footer>
+              <span class="summary"> {{ summary.taxFormatted }} </span>
+            </template>
+          </Column>
+          <Column field="tipFormatted" header="Tip">
+            <template #footer>
+              <span class="summary"> {{ summary.tipFormatted }} </span>
+            </template>
+          </Column>
+          <Column field="totalFormatted" header="Total">
+            <template #footer>
+              <span class="summary"> {{ summary.totalFormatted }} </span>
+            </template>
+          </Column>
         </DataTable>
       </Fieldset>
     </template>
@@ -273,5 +382,9 @@ const splitBill = () => {
 <style scoped>
 .form-control {
   margin-bottom: 1em;
+}
+
+.summary {
+  font-weight: bold;
 }
 </style>
